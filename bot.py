@@ -1,91 +1,113 @@
-	mport os
 import telebot
+from telebot import types
+import os
+import time
 import requests
 
-# Tus tokens y credenciales seguras (se configuran luego en Render)
-TOKEN = os.getenv("BOT_TOKEN")  # Token de tu bot de Telegram
-SUPABASE_URL = os.getenv("SUPABASE_URL")  # URL de tu proyecto Supabase
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")  # Key anon o service_role de Supabase
-
+TOKEN = "8881010834:AAEeIE20GxhGlKthPpZd1pxQ-PSKyB5MHBU"
 bot = telebot.TeleBot(TOKEN)
 
-HEADERS = {
+# Tu ID real de administrador
+ADMIN_ID = "7995284100"
+
+# 3 días calculados en segundos
+TIEMPO_PRUEBA = 3 * 24 * 60 * 60
+
+# Variables de entorno de Supabase (las lee de Render automáticamente)
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
+
+headers = {
     "apikey": SUPABASE_KEY,
     "Authorization": f"Bearer {SUPABASE_KEY}",
     "Content-Type": "application/json",
-    "Prefer": "return=representation",
+    "Prefer": "return=representation"
 }
 
+tasa_actual = {
+    "usdt": 720.00,
+    "fuente": "Actualizado por JSL"
+}
 
-def cargar_db():
-  """Carga los usuarios y licencias desde la nube de Supabase"""
-  try:
-    url = f"{SUPABASE_URL}/rest/v1/usuarios?select=*"
-    response = requests.get(url, headers=HEADERS)
-    if response.status_code == 200:
-      data = response.json()
-      db = {}
-      for row in data:
-        db[str(row["user_id"])] = {"licencia": row["licencia"]}
-      return db
-  except Exception as e:
-    print(f"Error cargando DB: {e}")
-  return {}
+# --- SISTEMA DE BASE DE DATOS (SUPABASE EN LA NUBE) ---
+def obtener_estado_usuario(user_id):
+    url = f"{SUPABASE_URL}/rest/v1/usuarios?user_id=eq.{user_id}&select=*"
+    try:
+        response = requests.get(url, headers=headers)
+        data = response.json()
+        if isinstance(data, list) and len(data) > 0:
+            return data[0]
+        else:
+            # Si el usuario es nuevo, lo registramos
+            nuevo_usuario = {
+                "user_id": str(user_id),
+                "registro": time.time(),
+                "licencia": False
+            }
+            requests.post(f"{SUPABASE_URL}/rest/v1/usuarios", headers=headers, json=nuevo_usuario)
+            return nuevo_usuario
+    except Exception as e:
+        print("Error al conectar con Supabase:", e)
+        return {"user_id": str(user_id), "registro": time.time(), "licencia": False}
 
+# --- LÓGICA DE ACCESO Y LICENCIAS ---
+def verificar_acceso(user_id):
+    if str(user_id) == ADMIN_ID:
+        return True, "admin"
 
-def guardar_usuario_db(user_id, licencia_val):
-  """Guarda o actualiza un usuario directamente en Supabase"""
-  try:
-    url = f"{SUPABASE_URL}/rest/v1/usuarios"
-    payload = {"user_id": str(user_id), "licencia": licencia_val}
-    headers_upsert = HEADERS.copy()
-    headers_upsert["Prefer"] = "resolution=merge-duplicates"
+    estado = obtener_estado_usuario(user_id)
 
-    response = requests.post(url, headers=headers_upsert, json=payload)
-    return response.status_code in [200, 201]
-  except Exception as e:
-    print(f"Error guardando DB: {e}")
-    return False
+    if estado.get("licencia"):
+        return True, "licencia"
 
+    tiempo_usado = time.time() - float(estado.get("registro", time.time()))
+    if tiempo_usado < TIEMPO_PRUEBA:
+        return True, "prueba"
 
-# --- COMANDOS DEL BOT ---
+    return False, "expirado"
 
+def mensaje_bloqueo():
+    return (
+        "⏳ *TIEMPO DE PRUEBA AGOTADO* ⏳\n\n"
+        "Tus 3 días de acceso gratuito al sistema JSL han finalizado.\n\n"
+        "Para seguir consultando la tasa en tiempo real sin interrupciones, "
+        "necesitas adquirir una **Licencia de Pago Único (Vitalicia)**.\n\n"
+        "👤 *Comunícate con la administración para realizar tu pago y activar tu acceso:*\n"
+        "👉 @TuUsuarioDeTelegram\n"
+        "📞 +53 51420349"
+    )
 
-@bot.message_handler(commands=["start"])
-def send_welcome(message):
-  user_id = str(message.from_user.id)
-  db = cargar_db()
+# --- INTERFAZ Y MANEJADORES ---
+def crear_teclado():
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
+    btn_precio = types.KeyboardButton("Consultar USDT Real")
+    markup.add(btn_precio)
+    return markup
 
-  # Si el usuario no existe en la base de datos, lo creamos con licencia False por defecto
-  if user_id not in db:
-    guardar_usuario_db(user_id, False)
+@bot.message_handler(commands=['start'])
+def comando_start(message):
+    acceso, tipo = verificar_acceso(message.from_user.id)
+    if not acceso:
+        bot.send_message(message.chat.id, mensaje_bloqueo(), parse_mode="Markdown")
+        return
+    
+    bot.send_message(
+        message.chat.id, 
+        "👋 Bienvenido al Bot de USDT de JSL.\n\nElige una opción del menú de abajo:", 
+        reply_markup=crear_teclado()
+    )
 
-  bot.reply_to(
-      message,
-      "¡Bienvenido al Bot JSL de monitoreo USDT! Tu usuario ha sido registrado"
-      " en la base de datos segura.",
-  )
+@bot.message_handler(func=lambda message: message.text == "Consultar USDT Real")
+def consultar_precio(message):
+    acceso, tipo = verificar_acceso(message.from_user.id)
+    if not acceso:
+        bot.send_message(message.chat.id, mensaje_bloqueo(), parse_mode="Markdown")
+        return
+    
+    texto = f"💵 *TASA USDT ACTUAL*\n\n💰 Valor: {tasa_actual['usdt']} CUP\n📊 Fuente: {tasa_actual['fuente']}"
+    bot.send_message(message.chat.id, texto, parse_mode="Markdown")
 
-
-@bot.message_handler(commands=["dar_licencia"])
-def dar_licencia(message):
-  # Comando de administrador para activar licencia a un usuario
-  if str(message.from_user.id) == "TU_ID_DE_ADMIN":
-    partes = message.text.split()
-    if len(partes) > 1:
-      id_a_activar = partes[1]
-      guardar_usuario_db(id_a_activar, True)
-      bot.reply_to(
-          message,
-          f"¡Licencia activada con éxito para el usuario {id_a_activar}!",
-      )
-    else:
-      bot.reply_to(message, "Uso: /dar_licencia [ID_DEL_USUARIO]")
-  else:
-    bot.reply_to(message, "No tienes permisos para usar este comando.")
-
-
-# Iniciar el bot
-print("Bot JSL iniciado correctamente...")
-bot.infinity_polling()
+if __name__ == "__main__":
+    print("Bot JSL iniciando con Supabase en Render...")
+    bot.infinity_polling()
 
