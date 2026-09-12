@@ -3,6 +3,8 @@ from telebot import types
 import os
 import time
 import requests
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 TOKEN = "8881010834:AAEeIE20GxhG1KthPpZd1pxQ-PSKyB5MHBU"
 bot = telebot.TeleBot(TOKEN)
@@ -107,7 +109,22 @@ def consultar_precio(message):
     texto = f"💵 *TASA USDT ACTUAL*\n\n💰 Valor: {tasa_actual['usdt']} CUP\n📊 Fuente: {tasa_actual['fuente']}"
     bot.send_message(message.chat.id, texto, parse_mode="Markdown")
 
+# --- SERVIDOR WEB FALSO PARA RENDER ---
+class ServidorFalso(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot JSL Activo y Escuchando")
+
+def mantener_vivo():
+    puerto = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", puerto), ServidorFalso)
+    server.serve_forever()
+
 if __name__ == "__main__":
-    print("Bot JSL iniciando con Supabase en Render...")
+    # Iniciar el servidor web falso en segundo plano
+    threading.Thread(target=mantener_vivo, daemon=True).start()
+    
+    print("Bot JSL iniciando con base de datos en Supabase y Servidor Web activo...")
     bot.infinity_polling()
 
