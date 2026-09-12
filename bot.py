@@ -4,7 +4,7 @@ import os
 import time
 import requests
 
-TOKEN = "8881010834:AAEeIE20GxhGlKthPpZd1pxQ-PSKyB5MHBU"
+TOKEN = "8881010834:AAEeIE20GxhG1KthPpZd1pxQ-PSKyB5MHBU"
 bot = telebot.TeleBot(TOKEN)
 
 # Tu ID real de administrador
