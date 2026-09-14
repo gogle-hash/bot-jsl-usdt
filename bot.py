@@ -1,12 +1,12 @@
 from http.server import BaseHTTPRequestHandler, HTTPServer
+import json
 import os
-import requests
 import telebot
 from telebot import types
 import threading
 import time
 
-TOKEN = "8881010834:AAEeIE20GxhG1KthPpZd1pxQ-PSKyB5MHBU"
+TOKEN = os.environ.get("TELEGRAM_TOKEN", "8881010834:AAEeIE20GxhG1KthPpZd1pxQ-PSKyB5MHBU")
 bot = telebot.TeleBot(TOKEN)
 
 # ID del Administrador (Javier)
@@ -14,76 +14,59 @@ ADMIN_ID = "7995284100"
 
 # Tiempo de prueba (3 días en segundos)
 TIEMPO_PRUEBA = 3 * 24 * 60 * 60
-
-# Configuración de Supabase
-SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
-
-headers = {
-    "apikey": SUPABASE_KEY,
-    "Authorization": f"Bearer {SUPABASE_KEY}",
-    "Content-Type": "application/json",
-    "Prefer": "return=representation",
-}
+FILE_DB = "usuarios.json"
 
 tasa_actual = {"usdt": 720.00, "fuente": "Actualizado por JSL"}
 
-# ==================== BASE DE DATOS (SUPABASE) ====================
+# ==================== BASE DE DATOS LOCAL ====================
 
-def obtener_estado_usuario(user_id):
-    url = f"{SUPABASE_URL}/rest/v1/usuarios?user_id=eq.{user_id}&select=*"
-    try:
-        response = requests.get(url, headers=headers)
-        data = response.json()
-        if isinstance(data, list) and len(data) > 0:
-            return data[0]
-        else:
-            nuevo_usuario = {
-                "user_id": str(user_id),
-                "registro": time.time(),
-                "licencia": False,
-            }
-            requests.post(
-                f"{SUPABASE_URL}/rest/v1/usuarios", headers=headers, json=nuevo_usuario
-            )
-            return nuevo_usuario
-    except Exception as e:
-        print("Error Supabase:", e)
-        return {"user_id": str(user_id), "registro": time.time(), "licencia": False}
+def cargar_usuarios():
+    if os.path.exists(FILE_DB):
+        try:
+            with open(FILE_DB, "r") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
 
-def cambiar_licencia_db(user_id, estado_licencia):
-    url = f"{SUPABASE_URL}/rest/v1/usuarios?user_id=eq.{user_id}"
-    payload = {"licencia": estado_licencia}
+def guardar_usuarios(db):
     try:
-        response = requests.patch(url, headers=headers, json=payload)
-        return response.status_code in [200, 204]
+        with open(FILE_DB, "w") as f:
+            json.dump(db, f, indent=4)
     except Exception as e:
-        print("Error actualizando licencia:", e)
-        return False
+        print("Error guardando JSON:", e)
 
-def obtener_todos_usuarios():
-    url = f"{SUPABASE_URL}/rest/v1/usuarios?select=*"
-    try:
-        response = requests.get(url, headers=headers)
-        data = response.json()
-        if isinstance(data, list):
-            return data
-        return []
-    except Exception as e:
-        print("Error al obtener usuarios:", e)
-        return []
+db_usuarios = cargar_usuarios()
+
+def obtener_o_crear_usuario(user_id):
+    uid = str(user_id)
+    if uid not in db_usuarios:
+        db_usuarios[uid] = {
+            "registro": time.time(),
+            "licencia": False
+        }
+        guardar_usuarios(db_usuarios)
+    return db_usuarios[uid]
 
 # ==================== LÓGICA DE LICENCIAS ====================
 
 def verificar_acceso(user_id):
-    if str(user_id) == ADMIN_ID:
+    uid = str(user_id)
+    if uid == ADMIN_ID:
         return True, "admin"
-    estado = obtener_estado_usuario(user_id)
-    if estado.get("licencia"):
+    
+    usr = obtener_o_crear_usuario(uid)
+    
+    # 1. Si pagó y tiene licencia, pasa directo
+    if usr.get("licencia"):
         return True, "licencia"
-    tiempo_usado = time.time() - float(estado.get("registro", time.time()))
+    
+    # 2. Si no ha pagado, calculamos cuánto tiempo lleva desde el registro
+    tiempo_usado = time.time() - float(usr.get("registro", time.time()))
     if tiempo_usado < TIEMPO_PRUEBA:
         return True, "prueba"
+    
+    # 3. Si ya pasaron los 3 días (259,200 segundos), se bloquea
     return False, "expirado"
 
 def mensaje_bloqueo():
@@ -97,8 +80,6 @@ def mensaje_bloqueo():
         "📞 Teléfono: +53 51420349"
     )
 
-# ==================== INTERFAZ Y TECLADO ====================
-
 def crear_teclado():
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     btn_precio = types.KeyboardButton("💵 Consultar USDT Real")
@@ -106,7 +87,31 @@ def crear_teclado():
     markup.add(btn_precio, btn_id)
     return markup
 
-# ==================== COMANDOS DE ADMINISTRADOR ====================
+# ==================== SISTEMA DE RESTAURACIÓN (NUEVO) ====================
+
+@bot.message_handler(content_types=['document'])
+def restaurar_respaldo(message):
+    # Si envías el archivo usuarios.json al bot, lo restaura
+    if str(message.from_user.id) != ADMIN_ID:
+        return
+    
+    if message.document.file_name == "usuarios.json":
+        try:
+            bot.reply_to(message, "⏳ Descargando copia de seguridad...")
+            file_info = bot.get_file(message.document.file_id)
+            downloaded_file = bot.download_file(file_info.file_path)
+            
+            with open(FILE_DB, 'wb') as new_file:
+                new_file.write(downloaded_file)
+            
+            global db_usuarios
+            db_usuarios = cargar_usuarios()
+            
+            bot.reply_to(message, "✅ *¡Base de datos restaurada!*\nTodos los clientes recuperaron su tiempo y licencias.", parse_mode="Markdown")
+        except Exception as e:
+            bot.reply_to(message, f"❌ Error al restaurar: {e}")
+
+# ==================== COMANDOS ADMIN ====================
 
 @bot.message_handler(commands=["admin"])
 def cmd_admin(message):
@@ -115,12 +120,22 @@ def cmd_admin(message):
     texto = (
         "⚙️ *PANEL DE ADMINISTRACIÓN JSL*\n\n"
         "• `/tasa [monto]` - Cambia la tasa USDT\n"
-        "• `/activar [user_id]` - Activa licencia a un usuario\n"
-        "• `/desactivar [user_id]` - Desactiva licencia a un usuario\n"
-        "• `/usuarios` - Muestra estadísticas de la base de datos\n"
-        "• `/notificar [mensaje]` - Envía un mensaje a TODOS los usuarios"
+        "• `/activar [user_id]` - Activa licencia VIP\n"
+        "• `/desactivar [user_id]` - Desactiva licencia VIP\n"
+        "• `/usuarios` - Muestra estadísticas\n"
+        "• `/notificar [mensaje]` - Mensaje masivo\n"
+        "• `/respaldo` - Pide el archivo de la base de datos"
     )
     bot.send_message(message.chat.id, texto, parse_mode="Markdown")
+
+@bot.message_handler(commands=["respaldo"])
+def cmd_respaldo(message):
+    if str(message.from_user.id) != ADMIN_ID:
+        return
+    guardar_usuarios(db_usuarios)
+    if os.path.exists(FILE_DB):
+        with open(FILE_DB, "rb") as f:
+            bot.send_document(message.chat.id, f, caption="📦 *Guarda este archivo.* Si el servidor se reinicia, reenvíamelo para restaurar todo.")
 
 @bot.message_handler(commands=["notificar"])
 def cmd_notificar(message):
@@ -128,27 +143,23 @@ def cmd_notificar(message):
         return
     
     texto_enviar = message.text.replace("/notificar", "").strip()
-    
     if not texto_enviar:
-        bot.reply_to(message, "❌ Debes escribir un mensaje. Ejemplo:\n`/notificar Hola a todos, la tasa bajó a 320!`", parse_mode="Markdown")
+        bot.reply_to(message, "❌ Ejemplo:\n`/notificar La tasa cambió a 725 CUP!`")
         return
         
-    bot.reply_to(message, "⏳ Enviando notificación masiva a todos los usuarios registrados... esto puede tardar un poco.")
+    bot.reply_to(message, "⏳ Enviando...")
+    enviados, fallidos = 0, 0
     
-    usuarios = obtener_todos_usuarios()
-    enviados = 0
-    fallidos = 0
-    
-    for u in usuarios:
-        if str(u['user_id']) != ADMIN_ID: # Evitar mandarte el mensaje a ti mismo si no quieres
+    for uid in list(db_usuarios.keys()):
+        if str(uid) != ADMIN_ID:
             try:
-                bot.send_message(u['user_id'], f"📢 *NOTIFICACIÓN DE JSL*\n\n{texto_enviar}", parse_mode="Markdown")
+                bot.send_message(uid, f"📢 *NOTIFICACIÓN DE JSL*\n\n{texto_enviar}", parse_mode="Markdown")
                 enviados += 1
-                time.sleep(0.1) # Pausa obligatoria para que Telegram no bloquee el bot por Spam
+                time.sleep(0.1)
             except Exception:
                 fallidos += 1
                 
-    bot.reply_to(message, f"✅ *Difusión terminada.*\n\nMensajes enviados exitosamente: *{enviados}*\nUsuarios que bloquearon el bot: *{fallidos}*", parse_mode="Markdown")
+    bot.reply_to(message, f"✅ Difusión: Enviados *{enviados}* | Fallidos *{fallidos}*", parse_mode="Markdown")
 
 @bot.message_handler(commands=["tasa"])
 def cmd_cambiar_tasa(message):
@@ -156,14 +167,14 @@ def cmd_cambiar_tasa(message):
         return
     partes = message.text.split()
     if len(partes) < 2:
-        bot.reply_to(message, "❌ Uso correcto: `/tasa 725`", parse_mode="Markdown")
+        bot.reply_to(message, "❌ Uso: `/tasa 725`", parse_mode="Markdown")
         return
     try:
         nueva_tasa = float(partes[1])
         tasa_actual["usdt"] = nueva_tasa
-        bot.reply_to(message, f"✅ Tasa actualizada correctamente a: *{nueva_tasa} CUP*", parse_mode="Markdown")
+        bot.reply_to(message, f"✅ Tasa actualizada a: *{nueva_tasa} CUP*", parse_mode="Markdown")
     except ValueError:
-        bot.reply_to(message, "❌ Error: El monto debe ser un número entero o decimal.")
+        bot.reply_to(message, "❌ Ingrese un número válido.")
 
 @bot.message_handler(commands=["activar"])
 def cmd_activar_usuario(message):
@@ -171,17 +182,23 @@ def cmd_activar_usuario(message):
         return
     partes = message.text.split()
     if len(partes) < 2:
-        bot.reply_to(message, "❌ Uso correcto: `/activar 123456789`", parse_mode="Markdown")
+        bot.reply_to(message, "❌ Uso: `/activar 123456789`", parse_mode="Markdown")
         return
     target_id = partes[1]
-    if cambiar_licencia_db(target_id, True):
-        bot.reply_to(message, f"✅ Licencia *ACTIVADA* para el usuario `{target_id}`.", parse_mode="Markdown")
-        try:
-            bot.send_message(target_id, "🎉 *¡LICENCIA ACTIVADA!*\n\nTu acceso vitalicio al bot JSL ha sido activado por el administrador.", parse_mode="Markdown")
-        except Exception:
-            pass
-    else:
-        bot.reply_to(message, "❌ Error al actualizar en Supabase.")
+    usr = obtener_o_crear_usuario(target_id)
+    usr["licencia"] = True
+    guardar_usuarios(db_usuarios)
+    
+    bot.reply_to(message, f"✅ Licencia *ACTIVADA* para `{target_id}`.", parse_mode="Markdown")
+    try:
+        bot.send_message(target_id, "🎉 *¡LICENCIA ACTIVADA!*\n\nTu acceso VIP ha sido activado.", parse_mode="Markdown")
+    except Exception:
+        pass
+    
+    # Te envía el respaldo automáticamente al cobrar
+    if os.path.exists(FILE_DB):
+        with open(FILE_DB, "rb") as f:
+            bot.send_document(ADMIN_ID, f, caption="🔄 *Respaldo de Seguridad*\n(Generado al activar un usuario)")
 
 @bot.message_handler(commands=["desactivar"])
 def cmd_desactivar_usuario(message):
@@ -189,30 +206,23 @@ def cmd_desactivar_usuario(message):
         return
     partes = message.text.split()
     if len(partes) < 2:
-        bot.reply_to(message, "❌ Uso correcto: `/desactivar 123456789`", parse_mode="Markdown")
         return
     target_id = partes[1]
-    if cambiar_licencia_db(target_id, False):
-        bot.reply_to(message, f"🚫 Licencia *DESACTIVADA* para el usuario `{target_id}`.", parse_mode="Markdown")
-    else:
-        bot.reply_to(message, "❌ Error al actualizar en Supabase.")
+    usr = obtener_o_crear_usuario(target_id)
+    usr["licencia"] = False
+    guardar_usuarios(db_usuarios)
+    bot.reply_to(message, f"🚫 Licencia *DESACTIVADA* para `{target_id}`.", parse_mode="Markdown")
 
 @bot.message_handler(commands=["usuarios"])
 def cmd_listar_usuarios(message):
     if str(message.from_user.id) != ADMIN_ID:
         return
-    lista = obtener_todos_usuarios()
-    total = len(lista)
-    con_licencia = sum(1 for u in lista if u.get("licencia"))
-    texto = (
-        f"📊 *ESTADÍSTICAS JSL*\n\n"
-        f"👥 Total registrados: *{total}*\n"
-        f"💎 Licencias activas: *{con_licencia}*\n"
-        f"⏳ En periodo de prueba / expirados: *{total - con_licencia}*"
-    )
+    total = len(db_usuarios)
+    con_licencia = sum(1 for u in db_usuarios.values() if u.get("licencia"))
+    texto = f"📊 *ESTADÍSTICAS*\n\n👥 Registrados: *{total}*\n💎 VIP: *{con_licencia}*\n⏳ Prueba/Expirados: *{total - con_licencia}*"
     bot.send_message(message.chat.id, texto, parse_mode="Markdown")
 
-# ==================== MANEJADORES DE USUARIOS ====================
+# ==================== MANEJADORES CLIENTES ====================
 
 @bot.message_handler(commands=["start"])
 def comando_start(message):
@@ -222,7 +232,7 @@ def comando_start(message):
         return
     bot.send_message(
         message.chat.id,
-        "👋 Bienvenido al Bot de USDT de JSL.\n\nElige una opción del menú de abajo:",
+        "👋 Bienvenido al Bot de USDT de JSL.\n\nElige una opción:",
         reply_markup=crear_teclado(),
     )
 
@@ -231,22 +241,13 @@ def comando_start(message):
 def consultar_id_estado(message):
     uid = message.from_user.id
     acceso, tipo = verificar_acceso(uid)
-    estado_txt = "Desconocido"
-    if tipo == "admin":
-        estado_txt = "👑 Administrador"
-    elif tipo == "licencia":
-        estado_txt = "💎 Licencia VIP Activa"
-    elif tipo == "prueba":
-        estado_txt = "⏳ Periodo de Prueba Gratuito"
-    else:
-        estado_txt = "❌ Acceso Expirado"
-    texto = (
-        f"🆔 *TU INFORMACIÓN*\n\n"
-        f"👤 Tu ID: `{uid}`\n"
-        f"📌 Estado: *{estado_txt}*\n\n"
-        f"_Envía tu ID al administrador cuando realices un pago para activar tu licencia._"
-    )
-    bot.send_message(message.chat.id, texto, parse_mode="Markdown")
+    
+    if tipo == "admin": estado_txt = "👑 Administrador"
+    elif tipo == "licencia": estado_txt = "💎 VIP Activa"
+    elif tipo == "prueba": estado_txt = "⏳ Periodo de Prueba"
+    else: estado_txt = "❌ Acceso Expirado"
+    
+    bot.send_message(message.chat.id, f"🆔 *TU INFORMACIÓN*\n\n👤 Tu ID: `{uid}`\n📌 Estado: *{estado_txt}*", parse_mode="Markdown")
 
 @bot.message_handler(func=lambda message: message.text == "💵 Consultar USDT Real")
 def consultar_precio(message):
@@ -254,16 +255,15 @@ def consultar_precio(message):
     if not acceso:
         bot.send_message(message.chat.id, mensaje_bloqueo(), parse_mode="Markdown")
         return
-    texto = f"💵 *TASA USDT ACTUAL*\n\n💰 Valor: *{tasa_actual['usdt']} CUP*\n📊 Fuente: {tasa_actual['fuente']}"
-    bot.send_message(message.chat.id, texto, parse_mode="Markdown")
+    bot.send_message(message.chat.id, f"💵 *TASA ACTUAL*\n\n💰 Valor: *{tasa_actual['usdt']} CUP*\n📊 Fuente: {tasa_actual['fuente']}", parse_mode="Markdown")
 
-# ==================== SERVIDOR WEB FALSO PARA RENDER ====================
+# ==================== SERVIDOR ====================
 
 class ServidorFalso(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Bot JSL Activo y Escuchando Trafico")
+        self.wfile.write(b"Bot JSL Activo")
 
 def mantener_vivo():
     puerto = int(os.environ.get("PORT", 10000))
@@ -272,6 +272,11 @@ def mantener_vivo():
 
 if __name__ == "__main__":
     threading.Thread(target=mantener_vivo, daemon=True).start()
-    print("Bot JSL iniciando con base de datos, panel admin y servidor web...")
+    print("Bot JSL iniciando...")
+    try:
+        # Aviso de posible reinicio a tu Telegram
+        bot.send_message(ADMIN_ID, "⚠️ *Sistema Iniciado/Reiniciado*\n\nSi Render borró la base de datos, por favor **reenvíame el último archivo usuarios.json** que te mandé para restaurar todo.", parse_mode="Markdown")
+    except Exception:
+        pass
     bot.infinity_polling()
-
+k
