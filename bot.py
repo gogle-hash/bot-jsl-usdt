@@ -57,16 +57,13 @@ def verificar_acceso(user_id):
     
     usr = obtener_o_crear_usuario(uid)
     
-    # 1. Si pagó y tiene licencia, pasa directo
     if usr.get("licencia"):
         return True, "licencia"
     
-    # 2. Si no ha pagado, calculamos cuánto tiempo lleva desde el registro
     tiempo_usado = time.time() - float(usr.get("registro", time.time()))
     if tiempo_usado < TIEMPO_PRUEBA:
         return True, "prueba"
     
-    # 3. Si ya pasaron los 3 días (259,200 segundos), se bloquea
     return False, "expirado"
 
 def mensaje_bloqueo():
@@ -87,11 +84,10 @@ def crear_teclado():
     markup.add(btn_precio, btn_id)
     return markup
 
-# ==================== SISTEMA DE RESTAURACIÓN (NUEVO) ====================
+# ==================== RESTAURACIÓN ====================
 
 @bot.message_handler(content_types=['document'])
 def restaurar_respaldo(message):
-    # Si envías el archivo usuarios.json al bot, lo restaura
     if str(message.from_user.id) != ADMIN_ID:
         return
     
@@ -195,7 +191,6 @@ def cmd_activar_usuario(message):
     except Exception:
         pass
     
-    # Te envía el respaldo automáticamente al cobrar
     if os.path.exists(FILE_DB):
         with open(FILE_DB, "rb") as f:
             bot.send_document(ADMIN_ID, f, caption="🔄 *Respaldo de Seguridad*\n(Generado al activar un usuario)")
@@ -257,13 +252,22 @@ def consultar_precio(message):
         return
     bot.send_message(message.chat.id, f"💵 *TASA ACTUAL*\n\n💰 Valor: *{tasa_actual['usdt']} CUP*\n📊 Fuente: {tasa_actual['fuente']}", parse_mode="Markdown")
 
-# ==================== SERVIDOR ====================
+# ==================== SERVIDOR WEB CORREGIDO (Soporte GET y HEAD) ====================
 
 class ServidorFalso(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
+        self.send_header("Content-type", "text/html")
         self.end_headers()
         self.wfile.write(b"Bot JSL Activo")
+
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/html")
+        self.end_headers()
+
+    def log_message(self, format, *args):
+        return  # Oculta los pings continuos del log para no saturar
 
 def mantener_vivo():
     puerto = int(os.environ.get("PORT", 10000))
@@ -274,9 +278,8 @@ if __name__ == "__main__":
     threading.Thread(target=mantener_vivo, daemon=True).start()
     print("Bot JSL iniciando...")
     try:
-        # Aviso de posible reinicio a tu Telegram
-        bot.send_message(ADMIN_ID, "⚠️ *Sistema Iniciado/Reiniciado*\n\nSi Render borró la base de datos, por favor **reenvíame el último archivo usuarios.json** que te mandé para restaurar todo.", parse_mode="Markdown")
+        bot.send_message(ADMIN_ID, "⚠️ *Sistema Iniciado/Reiniciado*\n\nSi Render borró la base de datos, por favor **reenvíame el último archivo usuarios.json** para restaurar todo.", parse_mode="Markdown")
     except Exception:
         pass
     bot.infinity_polling()
-k
+
